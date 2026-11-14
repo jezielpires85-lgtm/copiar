@@ -209,7 +209,7 @@ class BuildSession:
         await self.log("Layout", "Escrevendo a primeira versão HTML ao vivo no palco.")
         chunks = []
         async with client.messages.stream(
-            model=AGENT_MODEL, max_tokens=5000,
+            model=AGENT_MODEL, max_tokens=8192,
             system=(
                 "Crie sites profissionais. Retorne SOMENTE HTML completo, sem markdown. "
                 "IMPORTANTE para prévia ao vivo: use head MUITO curto (no máximo 1200 caracteres), "
