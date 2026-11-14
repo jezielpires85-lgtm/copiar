@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 echo ==========================================
 echo   AGENT SWARM STUDIO - Iniciando...
 echo ==========================================
@@ -48,7 +49,7 @@ cd ..
 
 echo.
 echo ==========================================
-echo   Backend:  http://localhost:8000
+echo   Backend:  http://localhost:8001
 echo   Frontend: http://localhost:3000
 echo ==========================================
 echo.

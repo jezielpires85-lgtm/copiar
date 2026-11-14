@@ -1,0 +1,21 @@
+services:
+  backend:
+    build: ../backend
+    env_file: ../.env
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build: ../frontend
+    ports:
+      - "127.0.0.1:8091:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"

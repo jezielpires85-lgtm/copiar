@@ -1,656 +1,323 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import Preview from './Preview'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+type BuildState = 'idle' | 'connecting' | 'building' | 'paused' | 'stopped' | 'complete' | 'error'
+type StepState = 'pending' | 'active' | 'done' | 'error'
+interface PlanItem { step: number; agent: string; task: string; status: StepState }
+interface Log { id: number; agent: string; message: string; color: string }
+interface ToolUse { name: string; agent: string; status: string; message: string }
 
-interface PlanItem {
-  step: number
-  agent: string
-  task: string
-  badge: string
-  status: 'pending' | 'active' | 'done'
+const AGENTS: Record<string, { color: string; role: string; icon: string }> = {
+  Layout: { color: '#a78bfa', role: 'Estrutura', icon: '▤' },
+  Grid: { color: '#fb923c', role: 'Layout responsivo', icon: '▦' },
+  Cor: { color: '#f472b6', role: 'Cores', icon: '◐' },
+  Tipo: { color: '#c4b5fd', role: 'Tipografia', icon: 'Aa' },
+  Dados: { color: '#4ade80', role: 'Conteúdo', icon: '▥' },
+  Copy: { color: '#facc15', role: 'Textos', icon: '≡' },
+  Gráfico: { color: '#60a5fa', role: 'Gráficos', icon: '▥' },
+  Pixel: { color: '#22d3ee', role: 'Detalhes', icon: '✦' },
+  Imagem: { color: '#2dd4bf', role: 'Ilustrações SVG', icon: '▧' },
+  Motion: { color: '#818cf8', role: 'Movimento', icon: '↗' },
+  Revisor: { color: '#f87171', role: 'Qualidade', icon: '✓' },
+  Deploy: { color: '#a3e635', role: 'Integração final', icon: '◇' },
 }
+const TOOL_LABEL: Record<string, string> = { inspect_site: 'Inspecionar página', edit_html: 'Editar trecho', validate_site: 'Validar HTML' }
+const EXAMPLES = [
+  { icon: '☕', title: 'Café do Bairro', prompt: 'Crie um site para a cafeteria Café do Bairro, com visual acolhedor em creme e marrom, apresentação, cardápio de três cafés com preços e contato. Use ilustrações SVG.' },
+  { icon: '◈', title: 'Estúdio criativo', prompt: 'Crie um portfólio para um estúdio criativo chamado Forma, com tipografia marcante, projetos em cards coloridos, serviços e contato.' },
+  { icon: '▥', title: 'Dashboard financeiro', prompt: 'Crie um dashboard financeiro com saldo, receitas, despesas, gráfico SVG mensal e tabela de transações com dados de exemplo identificados.' },
+]
+let logId = 0
 
-interface LogEntry {
-  id: number
-  agent: string
-  message: string
-  color: string
+function download(html: string) {
+  const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'site-gerado.html'
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
-
-type WsMsg =
-  | { type: 'status'; message: string }
-  | { type: 'plan'; items: Omit<PlanItem, 'status'>[] }
-  | { type: 'agent_start'; agent: string; step: number; total: number; task: string; color: string }
-  | { type: 'agent_done'; agent: string; step: number; total: number }
-  | { type: 'html_update'; agent: string; html: string; step: number; total: number }
-  | { type: 'html_chunk'; agent: string; chunk: string }
-  | { type: 'log'; agent: string; message: string; color: string }
-  | { type: 'complete'; html: string; steps: number }
-  | { type: 'error'; message: string }
-
-// ─── Agent colours ────────────────────────────────────────────────────────────
-
-const AGENT_COLOR: Record<string, string> = {
-  Layout:  '#a855f7',
-  Grid:    '#f97316',
-  Cor:     '#ec4899',
-  Tipo:    '#8b5cf6',
-  Dados:   '#22c55e',
-  Copy:    '#eab308',
-  Gráfico: '#3b82f6',
-  Pixel:   '#06b6d4',
-  Imagem:  '#14b8a6',
-  Motion:  '#6366f1',
-  Revisor: '#ef4444',
-  Deploy:  '#84cc16',
-}
-
-function agentColor(name: string) {
-  return AGENT_COLOR[name] ?? '#888'
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function cleanHtml(raw: string): string {
-  // Remove markdown fences the LLM sometimes adds around HTML
-  let s = raw.replace(/^```(?:html)?\r?\n?/i, '')
-  s = s.replace(/```\s*$/, '')
-  return s
-}
-
-let _logId = 0
-
-function PlanCard({ item }: { item: PlanItem }) {
-  const color = agentColor(item.agent)
-  const isActive = item.status === 'active'
-  const isDone = item.status === 'done'
-
-  return (
-    <div
-      style={{
-        marginBottom: 6,
-        padding: '10px 12px',
-        borderRadius: 8,
-        background: isActive ? '#161616' : '#0f0f0f',
-        border: `1px solid ${isActive ? color + '66' : isDone ? color + '22' : '#1c1c1c'}`,
-        boxShadow: isActive ? `0 0 14px 2px ${color}28` : 'none',
-        transition: 'border-color 0.2s, background 0.2s, box-shadow 0.2s',
-        animation: isActive ? 'agent-click 0.4s ease' : 'slide-in 0.2s ease',
-        // CSS custom property for glow-in keyframe
-        ['--glow-color' as string]: color + '44',
-      }}
-    >
-      {/* Row 1: dot + badge + status icon */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 5 }}>
-        <div
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: '50%',
-            flexShrink: 0,
-            background: isDone ? '#22c55e' : isActive ? color : '#2a2a2a',
-            animation: isActive ? 'pulse-dot 1.2s ease infinite' : undefined,
-          }}
-        />
-        <span
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: '0.08em',
-            padding: '2px 7px',
-            borderRadius: 4,
-            background: color + '18',
-            color,
-            border: `1px solid ${color}30`,
-          }}
-        >
-          {item.agent.toUpperCase()}
-        </span>
-        <span
-          style={{
-            marginLeft: 'auto',
-            fontSize: 11,
-            color: isDone ? '#22c55e' : isActive ? color : '#2a2a2a',
-          }}
-        >
-          {isDone ? '✓' : isActive ? '●' : '○'}
-        </span>
-      </div>
-      {/* Row 2: task description */}
-      <div
-        style={{
-          fontSize: 11.5,
-          color: isDone ? '#555' : isActive ? '#aaa' : '#3a3a3a',
-          lineHeight: 1.45,
-          paddingLeft: 14,
-          transition: 'color 0.25s',
-        }}
-      >
-        {item.task}
-      </div>
-    </div>
-  )
-}
-
-// ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [prompt, setPrompt] = useState('')
-  const [isBuilding, setIsBuilding] = useState(false)
+  const [state, setState] = useState<BuildState>('idle')
   const [plan, setPlan] = useState<PlanItem[]>([])
-  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [logs, setLogs] = useState<Log[]>([])
   const [html, setHtml] = useState('')
-  const [speed, setSpeed] = useState(1)
-  const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [activeAgent, setActiveAgent] = useState<string | null>(null)
-  const [statusMsg, setStatusMsg] = useState('')
-  const [isStreaming, setIsStreaming] = useState(false)
-  const [logCollapsed, setLogCollapsed] = useState(false)
+  const [message, setMessage] = useState('Descreva uma ideia. Acompanhe cada agente dando forma ao seu site.')
+  const [activity, setActivity] = useState('')
+  const [lastChange, setLastChange] = useState('')
+  const [toolUses, setToolUses] = useState<ToolUse[]>([])
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [logsOpen, setLogsOpen] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const [device, setDevice] = useState(1280)
+  const [zoom, setZoom] = useState('fit')
+  const [fullPage, setFullPage] = useState(false)
+  const [pageHeight, setPageHeight] = useState(900)
+  const [size, setSize] = useState({ width: 1000, height: 700 })
+  const [commit, setCommit] = useState(0)
+  const [chars, setChars] = useState(0)
+  const [elapsed, setElapsed] = useState(0)
+  const [pendingControl, setPendingControl] = useState('')
+  const [warnings, setWarnings] = useState<string[]>([])
+  const [agentFocus, setAgentFocus] = useState<{ id?: string; tag?: string } | null>(null)
+  const socket = useRef<WebSocket | null>(null)
+  const stateRef = useRef<BuildState>('idle')
+  const chunkBuffer = useRef('')
+  const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stage = useRef<HTMLDivElement>(null)
+  const root = useRef<HTMLDivElement>(null)
+  const logEnd = useRef<HTMLDivElement>(null)
+  const terminal = useRef(false)
+  const connectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  stateRef.current = state
+  const busy = state === 'building' || state === 'connecting' || state === 'paused'
+  const color = activeAgent ? AGENTS[activeAgent]?.color || '#a78bfa' : '#a78bfa'
+  const done = plan.filter(item => item.status === 'done').length
 
-  const wsRef = useRef<WebSocket | null>(null)
-  const logEndRef = useRef<HTMLDivElement>(null)
-  const chunkBufRef = useRef('')
-  const rafRef = useRef<number>(0)
-
-  // Auto-scroll log
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [logs])
-
-  const addLog = useCallback((agent: string, message: string, color: string) => {
-    setLogs(prev => [...prev.slice(-150), { id: _logId++, agent, message, color }])
+  const addLog = useCallback((agent: string, message: string, color = '#a7b3cb') => {
+    setLogs(prev => [...prev.slice(-199), { id: logId++, agent, message, color }])
   }, [])
 
-  const startBuild = useCallback(() => {
-    if (!prompt.trim() || isBuilding) return
+  const flushPreview = useCallback(() => {
+    if (previewTimer.current) clearTimeout(previewTimer.current)
+    previewTimer.current = null
+    const content = chunkBuffer.current.replace(/^\s*```(?:html)?\s*/i, '').replace(/```\s*$/, '')
+    setChars(content.length)
+    if (/<body[\s>]/i.test(content)) setHtml(content)
+  }, [])
 
-    // Close any existing connection
-    wsRef.current?.close()
-
-    const ws = new WebSocket(`ws://${window.location.host}/ws`)
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'build', prompt: prompt.trim(), speed }))
-      setIsBuilding(true)
-      setIsStreaming(false)
-      setPlan([])
-      setLogs([])
-      setHtml('')
-      setProgress({ done: 0, total: 0 })
-      setActiveAgent(null)
-      setStatusMsg('')
+  useEffect(() => {
+    const observer = new ResizeObserver(([entry]) => setSize({ width: entry.contentRect.width, height: entry.contentRect.height }))
+    if (stage.current) observer.observe(stage.current)
+    return () => observer.disconnect()
+  }, [])
+  useEffect(() => {
+    if (state !== 'building' && state !== 'connecting') return
+    const timer = setInterval(() => setElapsed(n => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [state])
+  useEffect(() => { logEnd.current?.scrollIntoView({ block: 'nearest' }) }, [logs])
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setExpanded(false) }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      socket.current?.close()
+      if (previewTimer.current) clearTimeout(previewTimer.current)
+      if (connectTimer.current) clearTimeout(connectTimer.current)
     }
+  }, [])
 
-    ws.onmessage = (event: MessageEvent) => {
-      const msg: WsMsg = JSON.parse(event.data as string)
-
+  const startBuild = (customPrompt?: string) => {
+    const value = (customPrompt || prompt).trim()
+    if (!value || busy) return
+    setPrompt(value)
+    const old = socket.current
+    if (old) { old.onclose = null; old.close() }
+    if (previewTimer.current) clearTimeout(previewTimer.current)
+    previewTimer.current = null
+    chunkBuffer.current = ''
+    terminal.current = false
+    setState('connecting')
+    setMessage('Conectando ao estúdio…')
+    setPlan([]); setLogs([]); setHtml(''); setToolUses([]); setWarnings([])
+    setChars(0); setElapsed(0); setCommit(0); setLastChange(''); setActiveAgent(null); setActivity(''); setPendingControl(''); setPageHeight(900)
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`)
+    socket.current = ws
+    connectTimer.current = setTimeout(() => { if (ws.readyState !== WebSocket.OPEN) ws.close() }, 15000)
+    ws.onopen = () => {
+      if (connectTimer.current) clearTimeout(connectTimer.current)
+      ws.send(JSON.stringify({ type: 'build', prompt: value }))
+    }
+    ws.onmessage = event => {
+      if (socket.current !== ws) return
+      let msg
+      try { msg = JSON.parse(event.data) } catch { return }
       switch (msg.type) {
-        case 'status':
-          setStatusMsg(msg.message)
+        case 'state':
+          setState(msg.state); setMessage(msg.message); setPendingControl('')
+          if (msg.state === 'paused' || msg.state === 'stopped') flushPreview()
+          if (msg.state === 'stopped') { terminal.current = true; setActiveAgent(null); ws.close() }
           break
-
-        case 'plan':
-          setPlan(msg.items.map(item => ({ ...item, status: 'pending' as const })))
-          setProgress({ done: 0, total: msg.items.length })
-          setStatusMsg('')
-          break
-
+        case 'notice': setMessage(msg.message); setPendingControl(''); break
+        case 'plan': setPlan(msg.items.map((item: PlanItem) => ({ ...item, status: 'pending' }))); break
         case 'agent_start':
-          chunkBufRef.current = ''
-          cancelAnimationFrame(rafRef.current)
-          setActiveAgent(msg.agent)
-          setIsStreaming(true)
-          setPlan(prev =>
-            prev.map(item => item.step === msg.step ? { ...item, status: 'active' } : item)
-          )
+          setAgentFocus(msg.focus || null)
+          setActiveAgent(msg.agent); setMessage(msg.task); setActivity('Preparando a próxima alteração…')
+          if (msg.step === 1) chunkBuffer.current = ''
+          setPlan(prev => prev.map(item => item.step === msg.step ? { ...item, status: 'active' } : item))
           break
-
         case 'agent_done':
-          setIsStreaming(false)
-          setPlan(prev =>
-            prev.map(item => item.step === msg.step ? { ...item, status: 'done' } : item)
-          )
-          setProgress({ done: msg.step, total: msg.total })
+          setPlan(prev => prev.map(item => item.step === msg.step ? { ...item, status: 'done' } : item))
           break
-
+        case 'activity': setActivity(msg.message); break
         case 'html_chunk':
-          chunkBufRef.current += msg.chunk
-          cancelAnimationFrame(rafRef.current)
-          rafRef.current = requestAnimationFrame(() => {
-            const cleaned = cleanHtml(chunkBufRef.current)
-            // Only update iframe once we have HTML past the <head> section
-            // This prevents blank/black frames during the first few hundred chars
-            if (cleaned.includes('<body') && cleaned.length > 400) {
-              setHtml(cleaned)
-            }
-          })
+          chunkBuffer.current += msg.chunk
+          if (!previewTimer.current) previewTimer.current = setTimeout(flushPreview, 220)
+          setActivity('Escrevendo HTML ao vivo…')
           break
-
         case 'html_update':
-          cancelAnimationFrame(rafRef.current)
-          chunkBufRef.current = ''
-          setHtml(cleanHtml(msg.html))
+          if (msg.focus) setAgentFocus(msg.focus)
+          if (previewTimer.current) clearTimeout(previewTimer.current)
+          previewTimer.current = null
+          chunkBuffer.current = msg.html
+          setHtml(msg.html); setChars(msg.html.length); setCommit(n => n + 1)
+          setLastChange(msg.change || 'Página atualizada'); setActivity(msg.change || 'Alteração aplicada ao palco')
           break
-
-        case 'log':
-          addLog(msg.agent, msg.message, msg.color)
+        case 'tool':
+          setToolUses(prev => [...prev.slice(-29), { name: msg.name, agent: msg.agent, status: msg.status, message: msg.message }])
+          setActivity(`${TOOL_LABEL[msg.name] || msg.name}: ${msg.message}`)
           break
-
+        case 'log': addLog(msg.agent, msg.message, msg.color); break
         case 'complete':
-          setIsBuilding(false)
-          setIsStreaming(false)
-          setActiveAgent(null)
-          setStatusMsg('Concluído!')
-          addLog('Sistema', 'Construção concluída ✓', '#22c55e')
+          flushPreview(); setHtml(msg.html); setState('complete'); setActiveAgent(null)
+          setMessage('Seu site está pronto. Explore a página ou baixe o HTML.'); setActivity(''); setPendingControl('')
+          setWarnings(msg.validation?.warnings || [])
+          addLog('Sistema', 'Os 12 agentes concluíram a construção.', '#4ade80')
+          terminal.current = true; ws.close()
           break
-
         case 'error':
-          setIsBuilding(false)
-          setIsStreaming(false)
-          setActiveAgent(null)
-          addLog('Erro', msg.message, '#ef4444')
-          setStatusMsg(msg.message)
-          break
-
-        default:
+          flushPreview(); setState('error'); setMessage(msg.message); setActivity(''); setPendingControl('')
+          setPlan(prev => prev.map(item => item.status === 'active' ? { ...item, status: 'error' } : item))
+          setActiveAgent(null); addLog('Erro', msg.message, '#f87171'); setLogsOpen(true)
+          terminal.current = true; ws.close()
           break
       }
     }
-
-    ws.onerror = () => {
-      setIsBuilding(false)
-      setIsStreaming(false)
-      addLog('Erro', 'Não foi possível conectar ao backend (localhost:8000). Certifique-se que está rodando.', '#ef4444')
-    }
-
+    ws.onerror = () => { if (!terminal.current) addLog('Conexão', 'Falha na conexão com o servidor.', '#f87171') }
     ws.onclose = () => {
-      setIsBuilding(false)
-      setIsStreaming(false)
+      if (socket.current !== ws || terminal.current) return
+      flushPreview(); setState('error'); setActiveAgent(null); setPendingControl('')
+      setMessage('A conexão foi encerrada. A prévia foi preservada; inicie uma nova construção para tentar novamente.')
+      addLog('Conexão', 'Conexão encerrada antes da conclusão.', '#f87171')
     }
-  }, [prompt, speed, isBuilding, addLog])
-
-  const handleDownload = () => {
-    if (!html) return
-    const blob = new Blob([html], { type: 'text/html' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'site-gerado.html'
-    a.click()
-    URL.revokeObjectURL(url)
   }
 
-  const aColor = activeAgent ? agentColor(activeAgent) : '#7c3aed'
+  const control = (type: 'pause' | 'resume' | 'stop') => {
+    if (state === 'connecting' && type === 'stop') {
+      terminal.current = true; socket.current?.close(); setState('stopped'); setMessage('Conexão cancelada.'); return
+    }
+    if (socket.current?.readyState !== WebSocket.OPEN || pendingControl) return
+    setPendingControl(type)
+    socket.current.send(JSON.stringify({ type }))
+  }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#0a0a0a', color: '#fff' }}>
+  const fullScreen = async () => {
+    setExpanded(true)
+    try {
+      if (!document.fullscreenElement) await root.current?.requestFullscreen()
+      else await document.exitFullscreen()
+    } catch { /* Expanded stage remains usable when native fullscreen is unavailable. */ }
+  }
+  const onPreviewError = useCallback((message: string) => addLog('Prévia', message, '#fbbf24'), [addLog])
+  const availableWidth = Math.max(100, size.width - 40)
+  const availableHeight = Math.max(100, size.height - 40)
+  const logicalHeight = fullPage ? Math.max(700, pageHeight) : 900
+  const scale = zoom === 'fit' ? Math.max(.1, Math.min(availableWidth / device, fullPage ? availableHeight / logicalHeight : 1)) : Number(zoom) / 100
+  const statusLabel = { idle: 'Pronto para criar', connecting: 'Conectando', building: 'Construindo ao vivo', paused: 'Pausado', stopped: 'Parado', complete: 'Concluído', error: 'Atenção' }[state]
 
-      {/* ── Header ── */}
-      <header style={{
-        height: 56,
-        borderBottom: '1px solid #161616',
-        display: 'flex',
-        alignItems: 'center',
-        padding: '0 20px',
-        gap: 16,
-        flexShrink: 0,
-      }}>
-        {/* Logo */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <polygon points="10,2 18,6 18,14 10,18 2,14 2,6" fill="none" stroke="#7c3aed" strokeWidth="1.5"/>
-            <circle cx="10" cy="10" r="2.5" fill="#7c3aed"/>
-          </svg>
-          <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.05em' }}>AGENT SWARM</span>
-          <span style={{ fontSize: 14, fontWeight: 300, color: '#444', letterSpacing: '0.08em' }}>STUDIO</span>
+  return <div ref={root} className={`studio ${expanded ? 'studio-expanded' : ''}`}>
+    <header className="topbar">
+      <div className="brand"><span className="brand-symbol">⬡</span><div>SWARM<span>STUDIO</span></div><small>SEU ESTÚDIO DE AGENTES</small></div>
+      <div className={`status status-${state}`}><i />{statusLabel}</div>
+      <div className="top-actions">
+        <button className={toolsOpen ? 'selected' : ''} onClick={() => setToolsOpen(v => !v)}>⌘ Ferramentas</button>
+        <button disabled={!html} onClick={() => download(html)}>↓ Baixar HTML</button>
+      </div>
+    </header>
+
+    <section className="composer">
+      <label htmlFor="project-prompt">O QUE VAMOS CONSTRUIR?<span>12 especialistas, uma página tomando forma.</span></label>
+      <div className="prompt-row">
+        <textarea id="project-prompt" value={prompt} maxLength={12000} disabled={busy} rows={2}
+          placeholder="Descreva seu site: para quem é, o que deve mostrar e qual estilo você imagina…"
+          onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) startBuild() }} />
+        <div className="build-controls">
+          {!busy && <button className="primary" disabled={!prompt.trim()} onClick={() => startBuild()}>✦ Construir site</button>}
+          {state === 'building' && <button disabled={!!pendingControl} onClick={() => control('pause')}>{pendingControl === 'pause' ? 'Pausando…' : 'Ⅱ Pausar'}</button>}
+          {state === 'paused' && <button className="primary" disabled={!!pendingControl} onClick={() => control('resume')}>{pendingControl === 'resume' ? 'Retomando…' : '▶ Continuar'}</button>}
+          {busy && <button className="danger" disabled={!!pendingControl} onClick={() => control('stop')}>{pendingControl === 'stop' ? 'Parando…' : '■ Parar'}</button>}
+        </div>
+      </div>
+    </section>
+
+    {toolsOpen && <section className="tools-panel">
+      <div><strong>Ferramentas dos agentes</strong><span>Chamadas reais, registradas na atividade.</span></div>
+      <span className="tool-chip">✓ Inspecionar página</span><span className="tool-chip">✓ Editar trechos HTML/CSS/JS</span><span className="tool-chip">✓ Validar estrutura</span>
+      <p>Ilustrações em SVG e CSS. Pesquisa web, geração de fotos, banco de dados e publicação dos sites gerados ainda não estão conectados.</p>
+      <button onClick={() => setToolsOpen(false)} aria-label="Fechar ferramentas">×</button>
+    </section>}
+
+    <div className="workspace">
+      <aside className="agents-panel">
+        <div className="panel-heading"><div><span className="eyebrow">EQUIPE DE CONSTRUÇÃO</span><h2>Os agentes</h2></div><span className="counter">{done}<span> / {plan.length || 12}</span></span></div>
+        <div className="progress-track"><span style={{ width: `${done / (plan.length || 12) * 100}%` }} /></div>
+        <div className="agent-list">
+          {Object.entries(AGENTS).map(([name, agent], index) => {
+            const item = plan.find(item => item.agent === name)
+            const status = item?.status || 'pending'
+            return <article key={name} className={`agent-card agent-${status}`} style={{ '--agent': agent.color } as React.CSSProperties}>
+              <div className="agent-icon">{status === 'done' ? '✓' : agent.icon}</div>
+              <div className="agent-info"><div><strong>{name}</strong><span>{status === 'done' ? 'Concluído' : status === 'error' ? 'Erro' : status === 'active' ? (state === 'paused' ? 'Pausado' : 'Trabalhando') : String(index + 1).padStart(2, '0')}</span></div>
+                <p>{item?.task || agent.role}</p>
+                {status === 'active' && <small>{activity || 'Preparando…'}</small>}
+              </div>
+            </article>
+          })}
+        </div>
+        <div className="team-note"><i /> Um agente por vez. Cada etapa preserva e melhora a anterior.</div>
+      </aside>
+
+      <main className="main-area">
+        <div className="stage-toolbar">
+          <div className="stage-label"><span className={state === 'building' ? 'live-dot' : 'stage-dot'} /><strong>Palco</strong><span className="stage-subtitle">{activeAgent || 'Prévia do site'}</span></div>
+          <div className="viewport-controls" role="group" aria-label="Tamanho da prévia">
+            {[{ w: 1280, label: 'Desktop' }, { w: 820, label: 'Tablet' }, { w: 390, label: 'Celular' }].map(item => <button key={item.w} className={device === item.w ? 'selected' : ''} onClick={() => { setDevice(item.w); setZoom('fit'); setFullPage(false) }}>{item.label}</button>)}
+          </div>
+          <div className="stage-actions">
+            <select aria-label="Zoom do palco" value={zoom} onChange={e => setZoom(e.target.value)}><option value="fit">Ajustar</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option></select>
+            <button className={fullPage ? 'selected' : ''} onClick={() => { setFullPage(v => !v); setZoom('fit') }}>Página inteira</button>
+            <button onClick={() => setExpanded(v => !v)}>{expanded ? '↙ Voltar ao estúdio' : '↗ Ampliar palco'}</button>
+            <button onClick={fullScreen} aria-label="Tela cheia" title="Tela cheia">⛶</button>
+          </div>
         </div>
 
-        {/* Input */}
-        <input
-          value={prompt}
-          onChange={e => setPrompt(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && startBuild()}
-          placeholder="Descreva o site que quer construir… (ex: dashboard financeiro, landing page de startup)"
-          disabled={isBuilding}
-          style={{
-            flex: 1,
-            background: '#0f0f0f',
-            border: '1px solid #1e1e1e',
-            borderRadius: 8,
-            padding: '9px 14px',
-            color: '#e0e0e0',
-            fontSize: 13,
-            fontFamily: 'inherit',
-            transition: 'border-color 0.2s',
-          }}
-          onFocus={e => { e.currentTarget.style.borderColor = '#7c3aed44' }}
-          onBlur={e => { e.currentTarget.style.borderColor = '#1e1e1e' }}
-        />
+        {expanded && <div className="focus-status"><span style={{ color }}>{activeAgent ? `${activeAgent} · ` : ''}{message}</span><div>
+          {state === 'building' && <button disabled={!!pendingControl} onClick={() => control('pause')}>Ⅱ Pausar</button>}
+          {state === 'paused' && <button disabled={!!pendingControl} onClick={() => control('resume')}>▶ Continuar</button>}
+          {busy && <button className="danger" disabled={!!pendingControl} onClick={() => control('stop')}>■ Parar</button>}
+        </div></div>}
 
-        {/* Build button */}
-        <button
-          onClick={startBuild}
-          disabled={isBuilding || !prompt.trim()}
-          style={{
-            flexShrink: 0,
-            background: isBuilding ? '#1a1a1a' : '#7c3aed',
-            border: '1px solid ' + (isBuilding ? '#222' : '#7c3aed'),
-            borderRadius: 8,
-            padding: '9px 18px',
-            color: isBuilding ? '#444' : '#fff',
-            fontSize: 13,
-            fontWeight: 600,
-            transition: 'background 0.2s',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 7,
-          }}
-        >
-          {isBuilding ? (
-            <>
-              <span style={{ animation: 'pulse-dot 1s ease infinite', display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#555' }} />
-              Construindo…
-            </>
-          ) : (
-            <>▶ Construir</>
-          )}
-        </button>
-
-        {/* Download */}
-        {html && !isBuilding && (
-          <button
-            onClick={handleDownload}
-            style={{
-              flexShrink: 0,
-              background: 'transparent',
-              border: '1px solid #222',
-              borderRadius: 8,
-              padding: '9px 14px',
-              color: '#555',
-              fontSize: 12,
-              transition: 'color 0.2s, border-color 0.2s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = '#444' }}
-            onMouseLeave={e => { e.currentTarget.style.color = '#555'; e.currentTarget.style.borderColor = '#222' }}
-          >
-            ↓ Baixar HTML
-          </button>
-        )}
-      </header>
-
-      {/* ── Body ── */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-
-        {/* Left sidebar — Plan */}
-        <aside style={{
-          width: 268,
-          borderRight: '1px solid #161616',
-          display: 'flex',
-          flexDirection: 'column',
-          flexShrink: 0,
-        }}>
-          <div style={{
-            padding: '12px 14px 8px',
-            fontSize: 10,
-            letterSpacing: '0.15em',
-            color: '#333',
-            fontWeight: 600,
-            borderBottom: '1px solid #111',
-          }}>
-            PLANO DE CONSTRUÇÃO
-          </div>
-
-          <div style={{ flex: 1, overflowY: 'auto', padding: '10px 10px' }}>
-            {plan.length === 0 ? (
-              <div style={{ textAlign: 'center', marginTop: 48, color: '#252525', fontSize: 12 }}>
-                <div style={{ fontSize: 28, marginBottom: 10 }}>⬡</div>
-                {statusMsg || 'O plano aparecerá aqui'}
-              </div>
-            ) : (
-              plan.map(item => <PlanCard key={item.step} item={item} />)
-            )}
-          </div>
-
-          {/* Agent legend */}
-          <div style={{ borderTop: '1px solid #111', padding: '10px 12px' }}>
-            <div style={{ fontSize: 9, letterSpacing: '0.15em', color: '#252525', marginBottom: 8 }}>AGENTES</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-              {Object.entries(AGENT_COLOR).map(([name, color]) => (
-                <span
-                  key={name}
-                  style={{
-                    fontSize: 9,
-                    padding: '2px 6px',
-                    borderRadius: 3,
-                    background: color + '15',
-                    color: color + 'aa',
-                    border: `1px solid ${color}20`,
-                    letterSpacing: '0.05em',
-                  }}
-                >
-                  {name}
-                </span>
-              ))}
+        <div className="stage" ref={stage}>
+          <div className="preview-position" style={{ display: html ? 'block' : 'none', width: device * scale, height: logicalHeight * scale }}>
+            <div className="preview-frame" style={{ width: device, height: logicalHeight, transform: `scale(${scale})` }}>
+              <Preview html={html} color={color} commit={commit} complete={state === 'complete'} agent={activeAgent} activity={activity || message} focus={agentFocus} paused={state === 'paused'} width={device} height={logicalHeight} onHeight={setPageHeight} onError={onPreviewError} />
             </div>
           </div>
-        </aside>
+          {!html && <div className="empty-stage">
+            <div className={`empty-mark ${busy ? 'is-working' : ''}`}>⬡<span>✦</span></div>
+            <div className="eyebrow">DA IDEIA À PRIMEIRA PÁGINA</div>
+            <h1>{state === 'building' ? (activeAgent ? 'Seu site está tomando forma.' : 'Montando sua equipe.') : state === 'paused' ? 'Construção pausada.' : state === 'error' ? 'Vamos tentar de novo?' : 'Um palco para sua próxima ideia.'}</h1>
+            <p>{busy || state === 'error' ? message : 'Descreva o que você imagina e veja cada especialista construir uma parte, ao vivo.'}</p>
+            {busy && <div className="generation-meter"><span className="live-dot" />{chars > 0 ? `${chars.toLocaleString('pt-BR')} caracteres recebidos · preparando a primeira seção` : 'Aguardando a resposta da IA…'}<strong>{elapsed}s</strong></div>}
+            {!busy && <div className="example-grid">{EXAMPLES.map(example => <button key={example.title} onClick={() => startBuild(example.prompt)}><span>{example.icon}</span><strong>{example.title}</strong><small>Construir exemplo ↗</small></button>)}</div>}
+          </div>}
+          {html && lastChange && <div className="change-badge" style={{ borderColor: color + '66' }}><span style={{ background: color }} /><strong>{activeAgent || 'Última alteração'}</strong><span>{lastChange}</span></div>}
+          {state === 'paused' && html && <div className="paused-badge">Ⅱ Pausado · prévia preservada</div>}
+        </div>
 
-        {/* Center — Canvas + Log */}
-        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-          {/* Canvas */}
-          <div style={{ flex: 1, position: 'relative', background: '#141414', overflow: 'hidden' }}>
-            {html ? (
-              <iframe
-                srcDoc={html}
-                sandbox="allow-scripts allow-same-origin"
-                title="Palco"
-                style={{
-                  position: 'absolute',
-                  top: 10, left: 10, right: 10, bottom: 10,
-                  width: 'calc(100% - 20px)',
-                  height: 'calc(100% - 20px)',
-                  border: '1px solid #2a2a2a',
-                  borderRadius: 6,
-                  display: 'block',
-                  boxShadow: '0 0 0 1px #1f1f1f, 0 8px 32px rgba(0,0,0,0.6)',
-                }}
-              />
-            ) : (
-              <div style={{
-                position: 'absolute', inset: 0,
-                display: 'flex', flexDirection: 'column',
-                alignItems: 'center', justifyContent: 'center',
-                gap: 14,
-              }}>
-                <svg width="48" height="48" viewBox="0 0 48 48" fill="none" style={{ opacity: 0.07 }}>
-                  <polygon points="24,4 44,14 44,34 24,44 4,34 4,14" fill="none" stroke="#fff" strokeWidth="2"/>
-                  <polygon points="24,12 36,18 36,30 24,36 12,30 12,18" fill="none" stroke="#fff" strokeWidth="1.5"/>
-                  <circle cx="24" cy="24" r="4" fill="#fff"/>
-                </svg>
-                <span style={{ color: '#1e1e1e', fontSize: 13 }}>
-                  {statusMsg || 'O palco está vazio — faça um prompt para começar'}
-                </span>
-              </div>
-            )}
-
-            {/* Streaming: active agent badge */}
-            {isStreaming && activeAgent && (
-              <div style={{
-                position: 'absolute',
-                top: 14,
-                right: 14,
-                background: '#0a0a0aee',
-                backdropFilter: 'blur(8px)',
-                border: `1px solid ${aColor}50`,
-                borderRadius: 8,
-                padding: '7px 12px',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-              }}>
-                <div style={{
-                  width: 7, height: 7, borderRadius: '50%',
-                  background: aColor,
-                  animation: 'pulse-dot 1s ease infinite',
-                }} />
-                <span style={{ fontSize: 12, color: aColor, fontWeight: 700 }}>{activeAgent}</span>
-                <span style={{ fontSize: 11, color: '#444' }}>gerando…</span>
-              </div>
-            )}
-
-            {/* Streaming: bottom scanner line */}
-            {isStreaming && (
-              <div style={{
-                position: 'absolute',
-                bottom: 0, left: 0, right: 0,
-                height: 2,
-                background: `linear-gradient(90deg, transparent, ${aColor}, transparent)`,
-                backgroundSize: '200% 100%',
-                animation: 'shimmer 1.5s linear infinite',
-              }} />
-            )}
-          </div>
-
-          {/* Agent Log */}
-          <div style={{
-            height: logCollapsed ? 32 : 150,
-            borderTop: '1px solid #161616',
-            background: '#070707',
-            display: 'flex',
-            flexDirection: 'column',
-            flexShrink: 0,
-            transition: 'height 0.25s ease',
-          }}>
-            <div style={{
-              padding: '7px 14px',
-              borderBottom: logCollapsed ? 'none' : '1px solid #111',
-              fontSize: 9,
-              letterSpacing: '0.15em',
-              color: '#252525',
-              fontWeight: 600,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              flexShrink: 0,
-              cursor: 'pointer',
-              userSelect: 'none',
-            }}
-              onClick={() => setLogCollapsed(v => !v)}
-            >
-              LOG DOS AGENTES
-              {isBuilding && (
-                <span style={{
-                  display: 'inline-block',
-                  width: 5, height: 5, borderRadius: '50%',
-                  background: '#22c55e',
-                  animation: 'blink 1s ease infinite',
-                }} />
-              )}
-              <span style={{ marginLeft: 'auto', color: '#333', fontSize: 10 }}>
-                {logCollapsed ? '▲' : '▼'}
-              </span>
-            </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 14px' }}>
-              {logs.length === 0 && (
-                <div style={{ color: '#1e1e1e', fontSize: 11, marginTop: 10 }}>Aguardando…</div>
-              )}
-              {logs.map(log => (
-                <div
-                  key={log.id}
-                  style={{
-                    display: 'flex',
-                    gap: 8,
-                    fontSize: 11,
-                    lineHeight: '1.9',
-                    fontFamily: "'JetBrains Mono', monospace",
-                    animation: 'slide-in 0.15s ease',
-                  }}
-                >
-                  <span style={{ color: log.color, fontWeight: 700, minWidth: 58, flexShrink: 0 }}>
-                    {log.agent}
-                  </span>
-                  <span style={{ color: '#2a2a2a' }}>›</span>
-                  <span style={{ color: '#4a4a4a' }}>{log.message}</span>
-                </div>
-              ))}
-              <div ref={logEndRef} />
-            </div>
-          </div>
-
-        </main>
-      </div>
-
-      {/* ── Bottom bar ── */}
-      <div style={{
-        height: 46,
-        borderTop: '1px solid #111',
-        background: '#070707',
-        display: 'flex',
-        alignItems: 'center',
-        padding: '0 20px',
-        gap: 12,
-        flexShrink: 0,
-      }}>
-        {/* Speed */}
-        <span style={{ fontSize: 9, letterSpacing: '0.15em', color: '#282828', fontWeight: 600 }}>
-          VELOCIDADE
-        </span>
-        {([1, 2, 3] as const).map(s => (
-          <button
-            key={s}
-            onClick={() => setSpeed(s)}
-            style={{
-              background: speed === s ? '#1a1a1a' : 'transparent',
-              border: `1px solid ${speed === s ? '#333' : '#161616'}`,
-              borderRadius: 5,
-              padding: '4px 10px',
-              color: speed === s ? '#ccc' : '#2a2a2a',
-              fontSize: 11,
-              fontWeight: speed === s ? 700 : 400,
-              transition: 'all 0.15s',
-            }}
-          >
-            {s}×
-          </button>
-        ))}
-
-        {/* Spacer */}
-        <div style={{ flex: 1 }} />
-
-        {/* CONSTRUÍDO */}
-        {progress.total > 0 && (
-          <>
-            <span style={{ fontSize: 9, letterSpacing: '0.15em', color: '#282828', fontWeight: 600 }}>
-              CONSTRUÍDO
-            </span>
-            <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.03em' }}>
-              <span style={{ color: '#7c3aed' }}>{progress.done}</span>
-              <span style={{ color: '#252525' }}>/{progress.total}</span>
-            </span>
-
-            {/* Bar */}
-            <div style={{ width: 100, height: 3, background: '#111', borderRadius: 2, overflow: 'hidden' }}>
-              <div
-                style={{
-                  height: '100%',
-                  background: '#7c3aed',
-                  borderRadius: 2,
-                  width: `${(progress.done / progress.total) * 100}%`,
-                  transition: 'width 0.4s ease',
-                }}
-              />
-            </div>
-          </>
-        )}
-
-        {/* Status pill */}
-        {statusMsg && !progress.total && (
-          <span style={{ fontSize: 11, color: '#333', fontStyle: 'italic' }}>{statusMsg}</span>
-        )}
-      </div>
-
+        <div className={`activity-panel ${logsOpen ? 'activity-open' : ''}`}>
+          <button className="activity-toggle" onClick={() => setLogsOpen(v => !v)}><span><i className={state === 'building' ? 'live-dot' : 'stage-dot'} /><strong>Atividade dos agentes</strong><small>{logs.length} registros</small></span><span>{logsOpen ? 'Recolher ↓' : 'Expandir ↑'}</span></button>
+          {logsOpen && <div className="activity-content">
+            <div className="log-list">{logs.length === 0 && <p>A primeira tarefa aparecerá aqui quando a construção começar.</p>}{logs.map(log => <div className="log-row" key={log.id}><strong style={{ color: log.color }}>{log.agent}</strong><span>{log.message}</span></div>)}<div ref={logEnd} /></div>
+            <div className="tool-history"><span className="eyebrow">FERRAMENTAS UTILIZADAS</span>{toolUses.filter(tool => tool.status !== 'running').slice(-5).reverse().map((tool, i) => <div key={i}><span className={tool.status === 'error' ? 'error-text' : 'ok-text'}>{tool.status === 'error' ? '!' : '✓'}</span><strong>{TOOL_LABEL[tool.name] || tool.name}</strong><small>{tool.agent} · {tool.message}</small></div>)}{!toolUses.length && <p>As chamadas de inspeção, edição e validação aparecem aqui.</p>}</div>
+          </div>}
+        </div>
+      </main>
     </div>
-  )
+    <footer className="statusbar"><span className={`status status-${state}`}><i />{statusLabel}</span><p role={state === 'error' ? 'alert' : 'status'}>{message}</p><span>{chars.toLocaleString('pt-BR')} caracteres</span><span>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</span>{warnings.length > 0 && <span className="warning" title={warnings.join('\n')}>{warnings.length} aviso(s)</span>}</footer>
+  </div>
 }
