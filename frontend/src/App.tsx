@@ -69,6 +69,7 @@ export default function App() {
   const [savedSites, setSavedSites] = useState<SavedSite[]>(() => {
     try { return JSON.parse(localStorage.getItem('copiar_sites') || '[]') } catch { return [] }
   })
+  const uploadRef = useRef<HTMLInputElement>(null)
   const socket = useRef<WebSocket | null>(null)
   const stateRef = useRef<BuildState>('idle')
   const chunkBuffer = useRef('')
@@ -208,6 +209,24 @@ export default function App() {
     }
   }
 
+  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const content = ev.target?.result as string
+      if (!content) return
+      setSavedSites(prev => {
+        const site: SavedSite = { id: Date.now().toString(), prompt: file.name.replace(/\.html?$/i, ''), html: content, date: new Date().toISOString() }
+        const updated = [site, ...prev].slice(0, 20)
+        try { localStorage.setItem('copiar_sites', JSON.stringify(updated)) } catch {}
+        return updated
+      })
+    }
+    reader.readAsText(file)
+  }
+
   const control = (type: 'pause' | 'resume' | 'stop') => {
     if (state === 'connecting' && type === 'stop') {
       terminal.current = true; socket.current?.close(); setState('stopped'); setMessage('Conexão cancelada.'); return
@@ -337,9 +356,13 @@ export default function App() {
       </main>
     </div>
     {galleryOpen && <aside className="gallery-drawer">
+      <input ref={uploadRef} type="file" accept=".html,.htm" style={{ display: 'none' }} onChange={handleUpload} />
       <div className="gallery-head">
         <div><span className="eyebrow">MEUS PROJETOS</span><h2>Sites salvos</h2></div>
-        <button onClick={() => setGalleryOpen(false)} title="Fechar">×</button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+          <button onClick={() => uploadRef.current?.click()} title="Importar HTML">↑ Importar</button>
+          <button onClick={() => setGalleryOpen(false)} title="Fechar">×</button>
+        </div>
       </div>
       {savedSites.length === 0
         ? <p className="gallery-empty">Nenhum site concluído ainda. Quando uma construção terminar, ela aparece aqui automaticamente.</p>
