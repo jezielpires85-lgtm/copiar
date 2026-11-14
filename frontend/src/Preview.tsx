@@ -74,6 +74,14 @@ const SHELL = `<!doctype html><html><head><meta charset="utf-8"><meta name="view
     } else interactive = false;
     requestAnimationFrame(() => { scrollTo(x, y); placeAgent(); report(); });
   });
+  document.addEventListener('click', function(e) {
+    var a = e.target.closest('a[href]');
+    if (!a) return;
+    var href = a.getAttribute('href');
+    if (!href || href === '#' || href.startsWith('#')) return;
+    e.preventDefault();
+    if (/^https?:\/\//.test(href) || href.startsWith('//')) window.open(href, '_blank', 'noopener');
+  }, true);
   addEventListener('scroll', placeAgent, {passive:true});
   addEventListener('error', event => parent.postMessage({type:'preview-error', message:String(event.message).slice(0, 200)}, '*'));
   parent.postMessage({type:'preview-ready'}, '*');

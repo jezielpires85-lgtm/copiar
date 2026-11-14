@@ -6,6 +6,7 @@ type StepState = 'pending' | 'active' | 'done' | 'error'
 interface PlanItem { step: number; agent: string; task: string; status: StepState }
 interface Log { id: number; agent: string; message: string; color: string }
 interface ToolUse { name: string; agent: string; status: string; message: string }
+interface SavedSite { id: string; prompt: string; html: string; date: string }
 
 const AGENTS: Record<string, { color: string; role: string; icon: string }> = {
   Layout: { color: '#a78bfa', role: 'Estrutura', icon: '▤' },
@@ -64,6 +65,10 @@ export default function App() {
   const [pendingControl, setPendingControl] = useState('')
   const [warnings, setWarnings] = useState<string[]>([])
   const [agentFocus, setAgentFocus] = useState<{ id?: string; tag?: string } | null>(null)
+  const [galleryOpen, setGalleryOpen] = useState(false)
+  const [savedSites, setSavedSites] = useState<SavedSite[]>(() => {
+    try { return JSON.parse(localStorage.getItem('copiar_sites') || '[]') } catch { return [] }
+  })
   const socket = useRef<WebSocket | null>(null)
   const stateRef = useRef<BuildState>('idle')
   const chunkBuffer = useRef('')
@@ -179,6 +184,12 @@ export default function App() {
           setWarnings(msg.validation?.warnings || [])
           addLog('Sistema', 'Os 12 agentes concluíram a construção.', '#4ade80')
           terminal.current = true; ws.close()
+          setSavedSites(prev => {
+            const site: SavedSite = { id: Date.now().toString(), prompt: value, html: msg.html, date: new Date().toISOString() }
+            const updated = [site, ...prev].slice(0, 20)
+            try { localStorage.setItem('copiar_sites', JSON.stringify(updated)) } catch {}
+            return updated
+          })
           break
         case 'error':
           flushPreview(); setState('error'); setMessage(msg.message); setActivity(''); setPendingControl('')
@@ -226,6 +237,7 @@ export default function App() {
       <div className={`status status-${state}`}><i />{statusLabel}</div>
       <div className="top-actions">
         <button className={toolsOpen ? 'selected' : ''} onClick={() => setToolsOpen(v => !v)}>⌘ Ferramentas</button>
+        <button className={galleryOpen ? 'selected' : ''} onClick={() => setGalleryOpen(v => !v)}>⊞ Projetos{savedSites.length > 0 && ` (${savedSites.length})`}</button>
         <button disabled={!html} onClick={() => download(html)}>↓ Baixar HTML</button>
       </div>
     </header>
@@ -324,6 +336,29 @@ export default function App() {
         </div>
       </main>
     </div>
+    {galleryOpen && <aside className="gallery-drawer">
+      <div className="gallery-head">
+        <div><span className="eyebrow">MEUS PROJETOS</span><h2>Sites salvos</h2></div>
+        <button onClick={() => setGalleryOpen(false)} title="Fechar">×</button>
+      </div>
+      {savedSites.length === 0
+        ? <p className="gallery-empty">Nenhum site concluído ainda. Quando uma construção terminar, ela aparece aqui automaticamente.</p>
+        : <div className="gallery-list">
+            {savedSites.map(site => (
+              <div key={site.id} className="gallery-card">
+                <p className="gallery-prompt">{site.prompt.length > 130 ? site.prompt.slice(0, 130) + '…' : site.prompt}</p>
+                <span className="gallery-date">{new Date(site.date).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
+                <div className="gallery-actions">
+                  <button className="primary" onClick={() => { setHtml(site.html); setChars(site.html.length); setState('complete'); setPrompt(site.prompt); setCommit(n => n + 1); setLastChange('Carregado do histórico'); setActiveAgent(null); setMessage('Site carregado.'); setGalleryOpen(false) }}>Carregar</button>
+                  <button onClick={() => { setPrompt(site.prompt); setGalleryOpen(false) }}>Editar</button>
+                  <button onClick={() => download(site.html)}>↓ HTML</button>
+                  <button className="danger" onClick={() => setSavedSites(prev => { const u = prev.filter(s => s.id !== site.id); try { localStorage.setItem('copiar_sites', JSON.stringify(u)) } catch {} return u })}>×</button>
+                </div>
+              </div>
+            ))}
+          </div>
+      }
+    </aside>}
     <footer className="statusbar"><span className={`status status-${state}`}><i />{statusLabel}</span><p role={state === 'error' ? 'alert' : 'status'}>{message}</p><span>{chars.toLocaleString('pt-BR')} caracteres</span><span>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</span>{warnings.length > 0 && <span className="warning" title={warnings.join('\n')}>{warnings.length} aviso(s)</span>}</footer>
   </div>
 }
