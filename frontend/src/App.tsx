@@ -217,12 +217,16 @@ export default function App() {
     reader.onload = ev => {
       const content = ev.target?.result as string
       if (!content) return
+      const name = file.name.replace(/\.html?$/i, '')
+      const site: SavedSite = { id: Date.now().toString(), prompt: name, html: content, date: new Date().toISOString() }
       setSavedSites(prev => {
-        const site: SavedSite = { id: Date.now().toString(), prompt: file.name.replace(/\.html?$/i, ''), html: content, date: new Date().toISOString() }
         const updated = [site, ...prev].slice(0, 20)
         try { localStorage.setItem('copiar_sites', JSON.stringify(updated)) } catch {}
         return updated
       })
+      setHtml(content); setChars(content.length); setState('complete'); setPrompt(name)
+      setCommit(n => n + 1); setLastChange('Importado de arquivo'); setActiveAgent(null)
+      setMessage('Site importado com sucesso.'); setGalleryOpen(false)
     }
     reader.readAsText(file)
   }
