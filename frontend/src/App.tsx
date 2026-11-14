@@ -52,6 +52,7 @@ export default function App() {
   const [toolsOpen, setToolsOpen] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [agentsPanelOpen, setAgentsPanelOpen] = useState(true)
   const [device, setDevice] = useState(1280)
   const [zoom, setZoom] = useState('fit')
   const [fullPage, setFullPage] = useState(false)
@@ -86,7 +87,7 @@ export default function App() {
     previewTimer.current = null
     const content = chunkBuffer.current.replace(/^\s*```(?:html)?\s*/i, '').replace(/```\s*$/, '')
     setChars(content.length)
-    if (/<body[\s>]/i.test(content)) setHtml(content)
+    if (content.length > 0) setHtml(content)
   }, [])
 
   useEffect(() => {
@@ -252,8 +253,8 @@ export default function App() {
     </section>}
 
     <div className="workspace">
-      <aside className="agents-panel">
-        <div className="panel-heading"><div><span className="eyebrow">EQUIPE DE CONSTRUÇÃO</span><h2>Os agentes</h2></div><span className="counter">{done}<span> / {plan.length || 12}</span></span></div>
+      <aside className={`agents-panel${agentsPanelOpen ? '' : ' agents-collapsed'}`}>
+        <div className="panel-heading"><div><span className="eyebrow">EQUIPE DE CONSTRUÇÃO</span><h2>Os agentes</h2></div><span className="counter">{done}<span> / {plan.length || 12}</span></span><button className="panel-toggle" onClick={() => setAgentsPanelOpen(v => !v)} title={agentsPanelOpen ? 'Recolher' : 'Expandir'}>{agentsPanelOpen ? '◀' : '▶'}</button></div>
         <div className="progress-track"><span style={{ width: `${done / (plan.length || 12) * 100}%` }} /></div>
         <div className="agent-list">
           {Object.entries(AGENTS).map(([name, agent], index) => {
@@ -277,6 +278,11 @@ export default function App() {
           <div className="viewport-controls" role="group" aria-label="Tamanho da prévia">
             {[{ w: 1280, label: 'Desktop' }, { w: 820, label: 'Tablet' }, { w: 390, label: 'Celular' }].map(item => <button key={item.w} className={device === item.w ? 'selected' : ''} onClick={() => { setDevice(item.w); setZoom('fit'); setFullPage(false) }}>{item.label}</button>)}
           </div>
+          {busy && <div className="stage-build-controls">
+            {state === 'building' && <button disabled={!!pendingControl} onClick={() => control('pause')}>{pendingControl === 'pause' ? 'Pausando…' : 'Ⅱ Pausar'}</button>}
+            {state === 'paused' && <button className="primary" disabled={!!pendingControl} onClick={() => control('resume')}>{pendingControl === 'resume' ? 'Retomando…' : '▶ Continuar'}</button>}
+            {busy && <button className="danger" disabled={!!pendingControl} onClick={() => control('stop')}>{pendingControl === 'stop' ? 'Parando…' : '■ Parar'}</button>}
+          </div>}
           <div className="stage-actions">
             <select aria-label="Zoom do palco" value={zoom} onChange={e => setZoom(e.target.value)}><option value="fit">Ajustar</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option></select>
             <button className={fullPage ? 'selected' : ''} onClick={() => { setFullPage(v => !v); setZoom('fit') }}>Página inteira</button>
