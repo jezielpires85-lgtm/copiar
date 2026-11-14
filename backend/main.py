@@ -227,11 +227,14 @@ class BuildSession:
                 self.preview = clean_html("".join(chunks))
                 await self.send("html_chunk", agent="Layout", chunk=text)
             final = await stream.get_final_message()
-            if final.stop_reason == "max_tokens":
-                raise ValueError("O HTML inicial excedeu o limite. Tente uma descrição mais simples.")
         html = clean_html("".join(chunks))
-        if "<body" not in html.lower() or "</html>" not in html.lower():
+        if "<body" not in html.lower():
             raise ValueError("O agente não retornou uma página HTML completa. Tente novamente.")
+        if final.stop_reason == "max_tokens":
+            if "</body>" not in html.lower():
+                html += "\n</body></html>"
+            elif "</html>" not in html.lower():
+                html += "\n</html>"
         return html
 
     async def refine_site(self, client, step):
