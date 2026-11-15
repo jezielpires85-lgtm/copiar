@@ -45,6 +45,8 @@ export default function App() {
   const [plan, setPlan] = useState<PlanItem[]>([])
   const [logs, setLogs] = useState<Log[]>([])
   const [html, setHtml] = useState('')
+  const [directPreview, setDirectPreview] = useState(false)
+  const [importedSite, setImportedSite] = useState(false)
   const [activeAgent, setActiveAgent] = useState<string | null>(null)
   const [message, setMessage] = useState('Descreva uma ideia. Acompanhe cada agente dando forma ao seu site.')
   const [activity, setActivity] = useState('')
@@ -122,6 +124,7 @@ export default function App() {
     const value = (customPrompt || prompt).trim()
     if (!value || busy) return
     setPrompt(value)
+    setDirectPreview(false); setImportedSite(false)
     const old = socket.current
     if (old) { old.onclose = null; old.close() }
     if (previewTimer.current) clearTimeout(previewTimer.current)
@@ -213,10 +216,13 @@ export default function App() {
     const file = e.target.files?.[0]
     if (!file) return
     e.target.value = ''
+    if (!/\.html?$/i.test(file.name)) { setState('error'); setMessage('Selecione um arquivo .html ou .htm.'); return }
+    if (file.size > 5 * 1024 * 1024) { setState('error'); setMessage('O arquivo excede 5 MB.'); return }
     const reader = new FileReader()
     reader.onload = ev => {
       const content = ev.target?.result as string
-      if (!content) return
+      if (!content?.trim()) { setState('error'); setMessage('O arquivo está vazio ou não pôde ser lido.'); return }
+      if (!/<(?:!doctype\s+html|html|body)\b/i.test(content)) { setState('error'); setMessage('O arquivo não contém uma página HTML reconhecível.'); return }
       const name = file.name.replace(/\.html?$/i, '')
       const site: SavedSite = { id: Date.now().toString(), prompt: name, html: content, date: new Date().toISOString() }
       setSavedSites(prev => {
@@ -224,11 +230,41 @@ export default function App() {
         try { localStorage.setItem('copiar_sites', JSON.stringify(updated)) } catch {}
         return updated
       })
-      setHtml(content); setChars(content.length); setState('complete'); setPrompt(name)
+      setHtml(content); setChars(content.length); setState('complete'); setPrompt(name); setDirectPreview(true)
+      setImportedSite(true)
       setCommit(n => n + 1); setLastChange('Importado de arquivo'); setActiveAgent(null)
-      setMessage('Site importado com sucesso.'); setGalleryOpen(false)
+      setMessage('Site importado e aberto para edição.'); setGalleryOpen(false)
+      setPlan([]); setToolUses([]); setWarnings([])
     }
     reader.readAsText(file)
+  }
+
+  const editImportedSite = (agent: string) => {
+    if (!importedSite || !html || busy) return
+    const task = `Melhore o site importado: ${agent}. Preserve o conteúdo, a identidade e as demais áreas. Faça alterações concretas no HTML atual.`
+    setDirectPreview(false)
+    setPlan(Object.entries(AGENTS).map(([name, info], index) => ({ step: index + 1, agent: name, task, status: name === agent ? 'active' : 'pending' })))
+    setActiveAgent(agent); setActivity('Analisando a página importada…'); setLogs([]); setToolUses([]); setState('connecting'); setElapsed(0)
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`)
+    socket.current = ws; terminal.current = false
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'edit_import', html, agent, task }))
+      setState('building'); setMessage(`${agent} está preparando alterações para o site importado.`)
+    }
+    ws.onmessage = event => {
+      if (socket.current !== ws) return
+      const msg = JSON.parse(event.data)
+      if (msg.type === 'state') { setState(msg.state); setMessage(msg.message) }
+      if (msg.type === 'html_update') { setHtml(msg.html); setChars(msg.html.length); setCommit(n => n + 1); setLastChange(msg.change || `Alteração de ${agent}`) }
+      if (msg.type === 'tool') setToolUses(prev => [...prev, { name: msg.name, agent: msg.agent, status: msg.status, message: msg.message }])
+      if (msg.type === 'activity') setActivity(msg.message)
+      if (msg.type === 'log') addLog(msg.agent, msg.message, msg.color)
+      if (msg.type === 'agent_done') { setPlan(prev => prev.map(item => item.agent === agent ? { ...item, status: 'done' } : item)); setActiveAgent(null) }
+      if (msg.type === 'complete') { setHtml(msg.html); setState('complete'); setMessage('Edição aplicada ao site importado.'); setWarnings(msg.validation?.warnings || []); setDirectPreview(false); setImportedSite(false); terminal.current = true; ws.close() }
+      if (msg.type === 'error') { setState('error'); setMessage(msg.message); setPlan(prev => prev.map(item => item.agent === agent ? { ...item, status: 'error' } : item)); setLogsOpen(true); terminal.current = true; ws.close() }
+    }
+    ws.onerror = () => { if (!terminal.current) { setState('error'); setMessage('Falha na conexão ao iniciar a edição.') } }
+    ws.onclose = () => { if (socket.current === ws && !terminal.current && stateRef.current === 'building') { setState('error'); setMessage('Conexão encerrada antes da edição.') } }
   }
 
   const control = (type: 'pause' | 'resume' | 'stop') => {
@@ -261,6 +297,7 @@ export default function App() {
       <div className="top-actions">
         <button className={toolsOpen ? 'selected' : ''} onClick={() => setToolsOpen(v => !v)}>⌘ Ferramentas</button>
         <button className={galleryOpen ? 'selected' : ''} onClick={() => setGalleryOpen(v => !v)}>⊞ Projetos{savedSites.length > 0 && ` (${savedSites.length})`}</button>
+        {importedSite && html && <select aria-label="Editar site importado com agente" defaultValue="" disabled={busy} onChange={e => { if (e.target.value) editImportedSite(e.target.value); e.target.value = '' }}><option value="">✎ Editar com agente…</option>{Object.keys(AGENTS).map(agent => <option key={agent} value={agent}>{agent}</option>)}</select>}
         <button disabled={!html} onClick={() => download(html)}>↓ Baixar HTML</button>
       </div>
     </header>
@@ -335,7 +372,7 @@ export default function App() {
         <div className="stage" ref={stage}>
           <div className="preview-position" style={{ display: html ? 'block' : 'none', width: device * scale, height: logicalHeight * scale }}>
             <div className="preview-frame" style={{ width: device, height: logicalHeight, transform: `scale(${scale})` }}>
-              <Preview html={html} color={color} commit={commit} complete={state === 'complete'} agent={activeAgent} activity={activity || message} focus={agentFocus} paused={state === 'paused'} width={device} height={logicalHeight} onHeight={setPageHeight} onError={onPreviewError} />
+          <Preview html={html} direct={directPreview} color={color} commit={commit} complete={state === 'complete'} agent={activeAgent} activity={activity || message} focus={agentFocus} paused={state === 'paused'} width={device} height={logicalHeight} onHeight={setPageHeight} onError={onPreviewError} />
             </div>
           </div>
           {!html && <div className="empty-stage">
@@ -376,7 +413,7 @@ export default function App() {
                 <p className="gallery-prompt">{site.prompt.length > 130 ? site.prompt.slice(0, 130) + '…' : site.prompt}</p>
                 <span className="gallery-date">{new Date(site.date).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
                 <div className="gallery-actions">
-                  <button className="primary" onClick={() => { setHtml(site.html); setChars(site.html.length); setState('complete'); setPrompt(site.prompt); setCommit(n => n + 1); setLastChange('Carregado do histórico'); setActiveAgent(null); setMessage('Site carregado.'); setGalleryOpen(false) }}>Carregar</button>
+                  <button className="primary" onClick={() => { setHtml(site.html); setChars(site.html.length); setState('complete'); setPrompt(site.prompt); setCommit(n => n + 1); setLastChange('Carregado do histórico'); setActiveAgent(null); setMessage('Site carregado.'); setDirectPreview(true); setImportedSite(true); setGalleryOpen(false) }}>Carregar</button>
                   <button onClick={() => { setPrompt(site.prompt); setGalleryOpen(false) }}>Editar</button>
                   <button onClick={() => download(site.html)}>↓ HTML</button>
                   <button className="danger" onClick={() => setSavedSites(prev => { const u = prev.filter(s => s.id !== site.id); try { localStorage.setItem('copiar_sites', JSON.stringify(u)) } catch {} return u })}>×</button>

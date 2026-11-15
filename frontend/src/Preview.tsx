@@ -90,6 +90,7 @@ const SHELL = `<!doctype html><html><head><meta charset="utf-8"><meta name="view
 
 interface Props {
   html: string
+  direct?: boolean
   color: string
   commit: number
   complete: boolean
@@ -105,8 +106,19 @@ interface Props {
 
 export default function Preview(props: Props) {
   const frame = useRef<HTMLIFrameElement>(null)
+  const objectUrl = useRef('')
   const latest = useRef(props)
   latest.current = props
+  const showImported = () => {
+    const p = latest.current
+    if (!p.direct || !p.html || !frame.current) return
+    const previous = objectUrl.current
+    const url = URL.createObjectURL(new Blob([p.html], { type: 'text/html;charset=utf-8' }))
+    objectUrl.current = url
+    frame.current.removeAttribute('srcdoc')
+    frame.current.src = url
+    if (previous) setTimeout(() => URL.revokeObjectURL(previous), 1000)
+  }
   const send = () => {
     const p = latest.current
     if (p.html) frame.current?.contentWindow?.postMessage({
@@ -117,6 +129,7 @@ export default function Preview(props: Props) {
   useEffect(() => {
     const listener = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow) return
+      if (latest.current.direct) return
       if (event.data?.type === 'preview-ready') send()
       if (event.data?.type === 'preview-height') latest.current.onHeight(event.data.height)
       if (event.data?.type === 'preview-error') latest.current.onError(event.data.message)
@@ -124,7 +137,15 @@ export default function Preview(props: Props) {
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
   }, [])
-  useEffect(send, [props.html, props.commit, props.complete, props.color, props.agent, props.activity, props.focus, props.paused])
-  return <iframe ref={frame} srcDoc={SHELL} onLoad={send} title="Palco — site em construção"
-    sandbox="allow-scripts" style={{ width: props.width, height: props.height }} />
+  useEffect(() => {
+    if (props.direct) showImported()
+    else {
+      if (objectUrl.current) { URL.revokeObjectURL(objectUrl.current); objectUrl.current = '' }
+      if (frame.current) { frame.current.removeAttribute('src'); frame.current.srcdoc = SHELL }
+      send()
+    }
+  }, [props.html, props.commit, props.complete, props.color, props.agent, props.activity, props.focus, props.paused, props.direct])
+  useEffect(() => () => { if (objectUrl.current) URL.revokeObjectURL(objectUrl.current) }, [])
+  return <iframe ref={frame} srcDoc={props.direct ? undefined : SHELL} onLoad={send} title="Palco — site em construção"
+    sandbox="allow-scripts allow-forms allow-modals" style={{ width: props.width, height: props.height }} />
 }
