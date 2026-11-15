@@ -174,6 +174,26 @@ class BuildSession:
 
     async def control(self, data):
         command = data.get("type")
+        if command == "edit_import":
+            name = data.get("agent")
+            imported_html = data.get("html")
+            task = data.get("task")
+            if self.status in {"building", "paused"}:
+                await self.send("error", message="Pare a construção atual antes de editar um site importado.")
+                return
+            if name not in AGENTS or not isinstance(imported_html, str) or len(imported_html) > 2_000_000 or not isinstance(task, str):
+                await self.send("error", message="O site ou agente selecionado não é válido.")
+                return
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                await self.send("error", message="A chave da API de IA não está configurada no servidor.")
+                return
+            self.prompt, self.html, self.preview = task, imported_html, imported_html
+            self.plan = [{"step": 1, "agent": name, "task": task, "badge": name.upper()}]
+            self.index = 0
+            self.status = "building"
+            await self.send("state", state="building", message=f"{name} está inspecionando o site importado…")
+            self.task = asyncio.create_task(self.run_import_edit(name))
+            return
         if command == "build":
             if self.status in {"building", "paused"}:
                 await self.send("notice", message="Pare a construção atual antes de iniciar outra.")
@@ -204,6 +224,21 @@ class BuildSession:
             self.status = "stopped"
             await self.send("state", state="stopped", message="Construção parada. A prévia foi preservada e pode ser baixada.")
             await self.log("Sistema", "Parada confirmada. Nenhuma chamada de IA continua em execução.")
+
+    async def run_import_edit(self, name):
+        try:
+            async with anthropic.AsyncAnthropic(timeout=120.0, max_retries=1) as client:
+                await self.send("agent_start", agent=name, step=1, total=1, task=self.plan[0]["task"], color=AGENTS[name]["color"])
+                await self.refine_site(client, self.plan[0])
+                self.index = 1
+                await self.send("agent_done", agent=name, step=1, total=1)
+                self.status = "complete"
+                await self.send("complete", html=self.html, steps=1, validation=inspect_html(self.html))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.status = "error"
+            await self.send("error", message=error_message(exc), step=1)
 
     async def initial_site(self, client):
         await self.log("Layout", "Escrevendo a primeira versão HTML ao vivo no palco.")
@@ -248,7 +283,7 @@ class BuildSession:
         for turn in range(5):
             await self.send("activity", agent=name, message="Analisando a página e preparando alterações…")
             response = await client.messages.create(
-                model=AGENT_MODEL, max_tokens=4500,
+                model=AGENT_MODEL, max_tokens=8192,
                 system=(f"Você é o agente {name}. Especialidade: {AGENTS[name]['role']}. "
                         "Você tem ferramentas reais de inspeção, edição de HTML e validação. "
                         "Faça de 1 a 3 edições pequenas e relevantes por etapa. "
@@ -260,6 +295,8 @@ class BuildSession:
                 tools=TOOLS, messages=messages,
             )
             if response.stop_reason == "max_tokens":
+                if edits:
+                    return
                 raise ValueError(f"{name}: a edição excedeu o limite de saída. Tente novamente.")
             messages.append({"role": "assistant", "content": response.content})
             results = []

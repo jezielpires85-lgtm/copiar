@@ -141,7 +141,7 @@ export default function Preview(props: Props) {
     if (props.direct) showImported()
     else {
       if (objectUrl.current) { URL.revokeObjectURL(objectUrl.current); objectUrl.current = '' }
-      if (frame.current) { frame.current.removeAttribute('src'); frame.current.srcdoc = SHELL }
+      if (frame.current) frame.current.removeAttribute('src')
       send()
     }
   }, [props.html, props.commit, props.complete, props.color, props.agent, props.activity, props.focus, props.paused, props.direct])
